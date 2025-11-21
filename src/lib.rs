@@ -7,7 +7,6 @@ use cbor4ii::core::{
     major, types,
 };
 use cid::{multibase, Cid};
-use pyo3::pybacked::PyBackedStr;
 use pyo3::{ffi, prelude::*, types::*, BoundObject, Python};
 
 // Copy from cbor4ii/src/core.rs.
@@ -110,40 +109,36 @@ fn map_key_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     }
 }
 
-fn sort_map_keys(keys: &Bound<PyList>, len: usize) -> Result<Vec<(PyBackedStr, usize)>> {
-    // Returns key and index.
-    let mut keys_str = Vec::with_capacity(len);
-    for i in 0..len {
-        let item = keys.get_item(i)?;
-        let key = match item.cast::<PyString>() {
-            Ok(k) => k.to_owned(),
-            Err(_) => return Err(anyhow!("Map keys must be strings")),
-        };
-        let backed_str = match PyBackedStr::try_from(key) {
-            Ok(bs) => bs,
-            Err(_) => return Err(anyhow!("Failed to convert PyString to PyBackedStr")),
-        };
-        keys_str.push((backed_str, i));
-    }
+fn sorted_dict_items<'py>(
+    dict: &'py Bound<'py, PyDict>,
+) -> Result<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+    let mut items = Vec::with_capacity(dict.len());
 
-    if keys_str.len() < 2 {
-        return Ok(keys_str);
-    }
-
-    keys_str.sort_by(|a, b| {
-        // sort_unstable_by performs bad
-        let (s1, _) = a;
-        let (s2, _) = b;
-
-        // sorted length-first by the byte representation of the string keys
-        if s1.len() != s2.len() {
-            s1.len().cmp(&s2.len())
-        } else {
-            s1.cmp(s2)
+    for (key, value) in dict {
+        // Check here as it cannot be checked within the sort function.
+        if let Err(_) = key.cast::<PyString>() {
+            return Err(anyhow!("Map keys must be strings"));
         }
+        items.push((key, value));
+    }
+
+    items.sort_unstable_by(|(a, _), (b, _)| {
+        let a_bytes = a
+            .cast::<PyString>()
+            .expect("cast was checked already")
+            .to_str()
+            .expect("A Python string is valid Unicode")
+            .as_bytes();
+        let b_bytes = b
+            .cast::<PyString>()
+            .expect("cast was checked already")
+            .to_str()
+            .expect("A Python string is valud Unicode")
+            .as_bytes();
+        map_key_cmp(a_bytes, b_bytes)
     });
 
-    Ok(keys_str)
+    Ok(items)
 }
 
 fn get_bytes_from_py_any<'py>(obj: &'py Bound<'py, PyAny>) -> PyResult<&'py [u8]> {
@@ -368,17 +363,16 @@ where
 
         Ok(())
     } else if let Ok(map) = obj.cast::<PyDict>() {
-        let len = map.len();
-        let keys = sort_map_keys(&map.keys(), len)?;
-        let values = map.values();
+        types::Map::bounded(map.len(), w)?;
 
-        types::Map::bounded(len, w)?;
-
-        for (key, i) in keys {
-            key.get(..)
-                .expect("whole range is a valid string")
+        let sorted = sorted_dict_items(map)?;
+        for (key, value) in sorted {
+            key.cast::<PyString>()
+                .expect("cast was checked while sorting")
+                .to_str()
+                .expect("A Python string is valid Unicode")
                 .encode(w)?;
-            encode_dag_cbor_from_pyobject(_py, &values.get_item(i)?, w)?;
+            encode_dag_cbor_from_pyobject(_py, &value, w)?;
         }
 
         Ok(())
