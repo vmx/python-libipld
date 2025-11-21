@@ -357,8 +357,8 @@ where
 
         types::Array::bounded(len, w)?;
 
-        for i in 0..len {
-            encode_dag_cbor_from_pyobject(_py, &l.get_item(i)?, w)?;
+        for item in l {
+            encode_dag_cbor_from_pyobject(_py, &item, w)?;
         }
 
         Ok(())
